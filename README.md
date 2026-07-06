@@ -24,6 +24,45 @@ This project goes beyond a simple clock, implementing professional engineering c
 * **Sensors:** LDR (Photoresistor) arranged in a voltage divider
 * **Inputs:** 4x Push Buttons (Pull-up configuration)
 
+## Wiring Connections
+
+Below is the hardware pinout and mapping for the ESP32 microcontroller. 
+
+### OLED Display (SPI)
+| OLED Pin | ESP32 Pin | Note |
+| :--- | :--- | :--- |
+| GND | GND | Common Ground |
+| VCC | 3.3V | 3.3V Logic |
+| D0 / SCK | GPIO 18 | VSPI SCK |
+| D1 / MOSI | GPIO 23 | VSPI MOSI |
+| RES | GPIO 4 | Reset |
+| DC | GPIO 19 | Data/Command |
+| CS | GPIO 5 | Chip Select |
+
+### RTC DS3231 (I2C)
+| RTC Pin | ESP32 Pin | Note |
+| :--- | :--- | :--- |
+| GND | GND | Common Ground |
+| VCC | 3.3V | 3.3V Logic |
+| SDA | GPIO 21 | Default I2C SDA |
+| SCL | GPIO 22 | Default I2C SCL |
+
+### WS2812B NeoPixel Strip
+| Strip Pin | ESP32 Pin | Note |
+| :--- | :--- | :--- |
+| GND | GND | Common Ground |
+| 5V | VIN / 5V PSU | Ensure sufficient current for 60 LEDs |
+| DIN | GPIO 27 | Data Line |
+
+### Inputs & Sensors
+| Component | ESP32 Pin | Wiring Configuration |
+| :--- | :--- | :--- |
+| Button 1 | GPIO 26 | Connect between pin and GND (Uses internal PULLUP) |
+| Button 2 | GPIO 32 | Connect between pin and GND (Uses internal PULLUP) |
+| Button 3 | GPIO 33 | Connect between pin and GND (Uses internal PULLUP) |
+| Button 4 | GPIO 25 | Connect between pin and GND (Uses internal PULLUP) |
+| LDR (Sensor) | GPIO 34 | Voltage Divider: LDR to 3.3V, Fixed Resistor to GND |
+
 ## Software Architecture (FreeRTOS)
 
 The system relies on 4 independent tasks managed by the FreeRTOS scheduler:
