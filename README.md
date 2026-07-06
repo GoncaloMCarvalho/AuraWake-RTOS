@@ -4,7 +4,7 @@ AuraWake is an advanced, multithreaded Smart Alarm Clock built on the ESP32 plat
 
 This project goes beyond a simple clock, implementing professional engineering concepts such as Exponential Moving Average (EMA) filtering, Gamma correction for human eye perception, and rigorous I2C hardware protection using Mutexes across dual-core processing.
 
-## 🚀 Key Features
+## Key Features
 
 * **Sunrise Simulation Alarm:** Gradually fades a NeoPixel LED strip from dark warm colors to bright white over 10 minutes to simulate a natural sunrise, promoting a smoother wake-up cycle.
 * **Smart Auto-Brightness & Smart Wake:** * Uses an LDR (Photoresistor) coupled with an **EMA (Exponential Moving Average) filter** to dynamically adjust the LED strip brightness, ignoring sudden light spikes or temporary shadows.
@@ -15,7 +15,7 @@ This project goes beyond a simple clock, implementing professional engineering c
 * **Hardware-Level Concurrency Protection:** Implements a `SemaphoreHandle_t` (Mutex) to strictly protect the DS3231 RTC I2C bus from concurrent access by overlapping tasks.
 * **Rich LED Animations:** Includes 11 independent lighting patterns (Rainbow, Confetti, BPM, Solid Colors, etc.) utilizing the FastLED/NeoPixel logic.
 
-## 🛠️ Hardware Requirements
+## Hardware Requirements
 
 * **Microcontroller:** ESP32 (e.g., NodeMCU-32S)
 * **Display:** 0.96" OLED SSD1306 (SPI Interface)
@@ -24,7 +24,7 @@ This project goes beyond a simple clock, implementing professional engineering c
 * **Sensors:** LDR (Photoresistor) arranged in a voltage divider
 * **Inputs:** 4x Push Buttons (Pull-up configuration)
 
-## 🧠 Software Architecture (FreeRTOS)
+## Software Architecture (FreeRTOS)
 
 The system relies on 4 independent tasks managed by the FreeRTOS scheduler:
 
@@ -35,7 +35,7 @@ The system relies on 4 independent tasks managed by the FreeRTOS scheduler:
 | `taskButton` | 0 | 3 | High-priority task with non-blocking debounce logic and long-press detection for UI navigation. |
 | `taskLED` | 1 | 2 | Runs isolated on Core 1 to ensure smooth, uninterrupted 60FPS NeoPixel rendering. |
 
-## 🎮 Controls & Interface
+## Controls & Interface
 
 The physical interface consists of 4 buttons with dual-action (Short Press / Long Press) capabilities:
 
@@ -48,7 +48,7 @@ The physical interface consists of 4 buttons with dual-action (Short Press / Lon
 
 *Note: Pressing any button while the screensaver is active will simply wake the display without executing its primary function.*
 
-## 📚 Dependencies
+## Dependencies
 
 This project requires the following libraries:
 * `SPI.h` & `Wire.h` (Native Arduino)

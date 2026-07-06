@@ -400,29 +400,34 @@ void taskButton(void *parameters) {
     bool lp3 = checkLongPress(button3);
     bool lp4 = checkLongPress(button4);
 
+    // If the alarm is active and button 1 is pressed, silence it immediately, regardless of screen state
+    if (b1 && sunriseStarted) {
+      sunriseStarted = false;
+      currentLightLuminosityIndex = 0;
+      currentLightLuminosity = OFF_LUMINOSITY;
+      isScreensaverActive = false;              // Wake the screen as a courtesy
+      lastInteractionTime = millis();           // Reset the timer
+      vTaskDelay(20 / portTICK_PERIOD_MS);
+      continue;     // Ignores the actions below in this exact cycle!
+    }
+
     // The Screensaver "Shield"
     if (b1 || b2 || b3 || b4 || lp3 || lp4) {
       lastInteractionTime = millis(); // Any touch resets the timer
       
       if (isScreensaverActive) {
-        isScreensaverActive = false; // Wakes up the screen
-        button3.longPressExecuted = false; // Clears flags to avoid entering edit mode accidentally
+        isScreensaverActive = false;          // Wakes up the screen
+        button3.longPressExecuted = false;    // Clears flags to avoid entering edit mode accidentally
         button4.longPressExecuted = false;
         vTaskDelay(20 / portTICK_PERIOD_MS);
         continue; // Ignores the actions below in this exact cycle!
       }
     }
 
-    // Button 1: Change luminosity mode or turn off alarm
+    // Button 1: Change luminosity mode (O código de desligar o alarme saiu daqui)
     if (b1) {
-      if (sunriseStarted) {
-        sunriseStarted = false;
-        currentLightLuminosityIndex = 0; // Forces OFF mode safely
-        currentLightLuminosity = OFF_LUMINOSITY; 
-      } else {
-        currentLightLuminosityIndex = (currentLightLuminosityIndex + 1) % 4;
-        currentLightLuminosity = (LightLuminosity)currentLightLuminosityIndex;
-      }
+      currentLightLuminosityIndex = (currentLightLuminosityIndex + 1) % 4;
+      currentLightLuminosity = (LightLuminosity)currentLightLuminosityIndex;
     }
 
     // Button 2: Change LED pattern
@@ -506,7 +511,7 @@ void checkAlarm() {
   }
   
   // Check if it's the correct time, ensuring it only triggers once per day
-  if (now.year() > 2000 && now.hour() == alarmHour && now.minute() == alarmMinute && !sunriseStarted) {
+  if (now.year() > 2000 && now.hour() == alarmHour && now.minute() == alarmMinute && !sunriseStarted && !editAlarm) {
     if (lastAlarmDay != now.day()) {
       sunriseStarted = true;
       previousMillisSunrise = millis();
