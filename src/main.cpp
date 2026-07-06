@@ -1,19 +1,19 @@
 // Libraries
 #include <Arduino.h>
-#include <SPI.h>                  //OLED
-#include <Wire.h>                 //RTC/OLED
-#include <RTClib.h>               //RTC
-#include <Adafruit_NeoPixel.h>    //LED STRIP
-#include <Adafruit_GFX.h>         //OLED
-#include <Adafruit_SSD1306.h>     //OLED
+#include <SPI.h>                  // OLED
+#include <Wire.h>                 // RTC/OLED
+#include <RTClib.h>               // RTC
+#include <Adafruit_NeoPixel.h>    // LED STRIP
+#include <Adafruit_GFX.h>         // OLED
+#include <Adafruit_SSD1306.h>     // OLED
 
 // Define pins and components
-//#define LED_BUILTIN 2             // Esp32 builtin led pin (defined in Arduino.h)
+//#define LED_BUILTIN 2             // ESP32 builtin LED pin (defined in Arduino.h)
 #define PHOTORESISTOR_PIN 34      // Photoresistor pin
-#define BUTTON_1 26               // Botão para mudar a luminosidade ou desativar o alarme
-#define BUTTON_2 32               // Botão para escolher o efeito da iluminacao dos leds
-#define BUTTON_3 33               // Botão long press ativa mudança de hora, curto incrementa parâmetro
-#define BUTTON_4 25               // Botão long press ativa mudança de alarme, curto incrementa parâmetro
+#define BUTTON_1 26               // Button to change luminosity or deactivate the alarm
+#define BUTTON_2 32               // Button to choose the LED lighting pattern
+#define BUTTON_3 33               // Button long press activates time edit, short press increments parameter
+#define BUTTON_4 25               // Button long press activates alarm edit, short press increments parameter
 
 // OLED parameters
 #define SCREEN_WIDTH    128       // OLED display width, in pixels
@@ -27,7 +27,7 @@
 #define OLED_DC   19              // VSPI MISC
 #define OLED_RESET 4              // Reset pin
 
-//LED strip parameters
+// LED strip parameters
 #define LED_PIN 27                // LED strip control pin
 #define NUM_LEDS 60               // Number of LEDs on the LED strip
 
@@ -38,27 +38,30 @@ RTC_DS3231 rtc;
 
 // Define the cycle of the different luminosities of the LED strip
 enum LightLuminosity { OFF_LUMINOSITY, DAY_LUMINOSITY, NIGHT_LUMINOSITY, AUTO_LUMINOSITY };
-LightLuminosity currentLightLuminosity = OFF_LUMINOSITY;
-int currentLightLuminosityIndex = 0;
+
+// --- VOLATILE Variables (Shared across Cores 0 and 1) ---
+volatile LightLuminosity currentLightLuminosity = OFF_LUMINOSITY;
+volatile int currentLightLuminosityIndex = 0;
+volatile uint8_t gCurrentPatternNumber = 0;
+volatile bool sunriseStarted = false;
+volatile int globalFilteredLDR = 0;       
+volatile bool isScreensaverActive = false;
+volatile unsigned long lastInteractionTime = 0;
 
 // LED strip patterns
 #define FRAMES_PER_SECOND 60
-uint8_t gCurrentPatternNumber = 0;       // Index of the current pattern
-uint8_t gHue = 0;                        // Base color used by the patterns
+uint8_t gHue = 0; // Base color used by patterns (Only used by TaskLED, no volatile needed)
 
-// --- Screensaver & Smart Wake Variables ---
-unsigned long lastInteractionTime = 0;
+// --- Screensaver & Smart Wake Constants ---
 const unsigned long SCREENSAVER_TIMEOUT = 60000; // 60 seconds of inactivity
-bool isScreensaverActive = false;
 int ssX = 50; // Screensaver X position
 int ssY = 30; // Screensaver Y position
 unsigned long lastScreensaverMove = 0;
 
 // --- Digital Filter (EMA - Exponential Moving Average) ---
 float smoothedLDR = 0.0;
-const float LDR_ALPHA = 0.05;    // Suavização de 5%
-const int WAKE_THRESHOLD = 1500; // Pico de luminosidade para acordar o ecrã (Ajustado pelos testes)
-int globalFilteredLDR = 0;       // Variável global para manter as tasks sincronizadas
+const float LDR_ALPHA = 0.05;    // 5% smoothing factor
+const int WAKE_THRESHOLD = 1000; // Sudden light jump threshold to wake the screen
 
 // Button variables
 #define DEBOUNCE_DELAY 50
@@ -86,7 +89,6 @@ const long displayInterval = 100;
 int alarmHour = 7;
 int alarmMinute = 30;
 bool alarmActive = false;
-bool sunriseStarted = false;
 unsigned long previousMillisSunrise = 0;
 const long sunriseDuration = 600000;  // 10 minutes of sunrise simulation
 
@@ -103,6 +105,9 @@ TaskHandle_t taskDisplayHandle;
 TaskHandle_t taskLEDHandle;
 TaskHandle_t taskButtonHandle;
 TaskHandle_t taskAlarmHandle;
+
+// I2C Mutex
+SemaphoreHandle_t i2cMutex;
 
 // Function prototypes
 void rainbow();
@@ -126,7 +131,7 @@ typedef void (*SimplePatternList[])();
 SimplePatternList gPatterns = {rainbow, rainbowWithGlitter, confetti, sinelon, juggle, bpm, solidRed, solidGreen, solidBlue, solidWhite, warmWhite};
 const int PATTERN_COUNT = sizeof(gPatterns) / sizeof(gPatterns[0]);
 
-// --- Smart LDR Filter Function ---
+// Smart LDR Filter Function
 int getFilteredLDR() {
   int rawValue = analogRead(PHOTORESISTOR_PIN);
   
@@ -134,32 +139,42 @@ int getFilteredLDR() {
     smoothedLDR = rawValue;
   }
   
-  // A LÓGICA DO SMART WAKE: Se ecrã dorme e luz acende repentinamente
+  // SMART WAKE LOGIC: If screen is sleeping and light turns on suddenly
   if (isScreensaverActive && ((rawValue - (int)smoothedLDR) > WAKE_THRESHOLD)) {
     isScreensaverActive = false;
-    lastInteractionTime = millis(); // Reinicia o temporizador
+    lastInteractionTime = millis(); // Reset interaction timer
   }
   
-  // Aplica o filtro EMA
+  // Apply the EMA filter
   smoothedLDR = (LDR_ALPHA * rawValue) + ((1.0 - LDR_ALPHA) * smoothedLDR);
   return (int)smoothedLDR;
 }
 
 // Display information function
 void displayInfo() {
-  DateTime now = rtc.now();
+  // Initialize with safe default values (Year 2000 prevents garbage data if Mutex fails)
+  DateTime now = DateTime(2000, 1, 1, 0, 0, 0);
+  float temperature = 0.0;
+  
+  // I2C PROTECTION: Safely read RTC data
+  if (xSemaphoreTake(i2cMutex, portMAX_DELAY)) {
+    now = rtc.now();
+    temperature = rtc.getTemperature();
+    xSemaphoreGive(i2cMutex);
+  }
+
   display.dim((now.hour() < 7) || (now.hour() > 22));
   display.clearDisplay();
   
-  // --- MODO SCREENSAVER (Proteção Burn-in) ---
+  // SCREENSAVER MODE (Burn-in Protection)
   if (isScreensaverActive) {
-    if (millis() - lastScreensaverMove > 5000) { // Muda de posição a cada 5 segundos
-      ssX = random(0, 90); // 128 (width) - aprox 30 (text width)
-      ssY = random(0, 56); // 64 (height) - 8 (text height)
+    if (millis() - lastScreensaverMove > 20000) {    // Changes position every 20 seconds
+      ssX = random(0, 65);                          // 128 (width) - approx 60 (text width)
+      ssY = random(0, 45);                          // 64 (height) - 16 (text height)
       lastScreensaverMove = millis();
     }
 
-    display.setTextSize(1);
+    display.setTextSize(2);
     display.setTextColor(WHITE);
     display.setCursor(ssX, ssY);
 
@@ -174,10 +189,11 @@ void displayInfo() {
 
     display.print(now.minute());
     display.display();
-    return; // Ignora o desenho do resto do UI!
+    
+    return; // Ignores drawing the rest of the UI!
   }
 
-  // --- MODO NORMAL ---
+  // NORMAL MODE
   display.setTextColor(WHITE);
   display.setTextSize(3);
 
@@ -212,8 +228,8 @@ void displayInfo() {
 
   // Display day of week and date
   display.setCursor(23, 24);
-  const char* diasSemana[] = {"Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"};
-  display.print(diasSemana[now.dayOfTheWeek()]);
+  const char* weekDays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  display.print(weekDays[now.dayOfTheWeek()]);
 
   bool showDay = !editTime || timePart != 3 || showValue;
   bool showMonth = !editTime || timePart != 4 || showValue;
@@ -252,7 +268,6 @@ void displayInfo() {
   display.print(ambientLuminosity);
 
   // Display temperature
-  float temperature = rtc.getTemperature();
   display.setCursor(66, 32);
   display.print(temperature, 1);
   display.setCursor(114, 32);
@@ -307,23 +322,23 @@ void displayInfo() {
 // Task for display updates
 void taskDisplay(void *parameters) {
   for(;;) {
-    // 1. LER O SENSOR CONTINUAMENTE (Atualiza o EMA e deteta o flash independentemente do ecrã)
+    // Read sensor continuously (Updates EMA and detects light regardless of screen state)
     globalFilteredLDR = getFilteredLDR();
 
     unsigned long currentMillis = millis();
     
-    // 2. Verifica timeout do Screensaver
+    // Check Screensaver timeout
     if (!isScreensaverActive && (currentMillis - lastInteractionTime > SCREENSAVER_TIMEOUT)) {
       isScreensaverActive = true;
-      editTime = false;   // Prevenção: sai dos modos de edição ao adormecer
+      editTime = false;   // Prevention: exit edit modes when sleeping
       editAlarm = false;
     }
 
-    // 3. Atualiza o ecrã
+    // Update Display
     if (currentMillis - previousMillisDisplay >= displayInterval) {
       previousMillisDisplay = currentMillis;
       
-      // Update blinking for editing
+      // Update blinking for the current editing field
       if (millis() - lastBlink > 500) {
         showValue = !showValue;
         lastBlink = millis();
@@ -377,7 +392,7 @@ bool checkLongPress(ButtonState &btn) {
 // Task for button handling
 void taskButton(void *parameters) {
   for(;;) {
-    // Analisa o estado de todos os botões no ciclo
+    // Analyze the state of all buttons in the cycle
     bool b1 = debounceButton(button1, BUTTON_1);
     bool b2 = debounceButton(button2, BUTTON_2);
     bool b3 = debounceButton(button3, BUTTON_3);
@@ -385,16 +400,16 @@ void taskButton(void *parameters) {
     bool lp3 = checkLongPress(button3);
     bool lp4 = checkLongPress(button4);
 
-    // O "Escudo" do Screensaver
+    // The Screensaver "Shield"
     if (b1 || b2 || b3 || b4 || lp3 || lp4) {
-      lastInteractionTime = millis(); // Qualquer toque repõe o temporizador
+      lastInteractionTime = millis(); // Any touch resets the timer
       
       if (isScreensaverActive) {
-        isScreensaverActive = false; // Acorda o ecrã
-        button3.longPressExecuted = false; // Limpa flags para não entrar em edição sem querer
+        isScreensaverActive = false; // Wakes up the screen
+        button3.longPressExecuted = false; // Clears flags to avoid entering edit mode accidentally
         button4.longPressExecuted = false;
         vTaskDelay(20 / portTICK_PERIOD_MS);
-        continue; // Ignora as ações abaixo neste exato ciclo!
+        continue; // Ignores the actions below in this exact cycle!
       }
     }
 
@@ -402,7 +417,7 @@ void taskButton(void *parameters) {
     if (b1) {
       if (sunriseStarted) {
         sunriseStarted = false;
-        currentLightLuminosityIndex = 0; // Força o modo OFF e deixa a taskLED fazer o strip.show() de forma segura
+        currentLightLuminosityIndex = 0; // Forces OFF mode safely
         currentLightLuminosity = OFF_LUMINOSITY; 
       } else {
         currentLightLuminosityIndex = (currentLightLuminosityIndex + 1) % 4;
@@ -426,19 +441,35 @@ void taskButton(void *parameters) {
       }
       button3.longPressExecuted = false;
     } else if (b3 && editTime) {
-      DateTime now = rtc.now();
-      int h = now.hour(), m = now.minute(), s = now.second();
-      int d = now.day(), mo = now.month(), y = now.year();
+      // Initialize with safe default value
+      DateTime now = DateTime(2000, 1, 1, 0, 0, 0);
       
-      switch(timePart) {
-        case 0: h = (h + 1) % 24; break;
-        case 1: m = (m + 1) % 60; break;
-        case 2: s = (s + 1) % 60; break;
-        case 3: d = (d % 31) + 1; break;
-        case 4: mo = (mo % 12) + 1; break;
-        case 5: y = y + 1; break;
+      // I2C Protection: Read time before modifying
+      if (xSemaphoreTake(i2cMutex, portMAX_DELAY)) {
+        now = rtc.now();
+        xSemaphoreGive(i2cMutex);
       }
-      rtc.adjust(DateTime(y, mo, d, h, m, s));
+      
+      // Only proceed if we got a valid reading
+      if (now.year() > 2000) {
+        int h = now.hour(), m = now.minute(), s = now.second();
+        int d = now.day(), mo = now.month(), y = now.year();
+        
+        switch(timePart) {
+          case 0: h = (h + 1) % 24; break;
+          case 1: m = (m + 1) % 60; break;
+          case 2: s = (s + 1) % 60; break;
+          case 3: d = (d % 31) + 1; break;
+          case 4: mo = (mo % 12) + 1; break;
+          case 5: y = y + 1; break;
+        }
+        
+        // I2C Protection: Safely adjust new time
+        if (xSemaphoreTake(i2cMutex, portMAX_DELAY)) {
+          rtc.adjust(DateTime(y, mo, d, h, m, s));
+          xSemaphoreGive(i2cMutex);
+        }
+      }
     }
 
     // Button 4: Alarm editing
@@ -464,10 +495,23 @@ void taskButton(void *parameters) {
 
 // Check alarm function
 void checkAlarm() {
-  DateTime now = rtc.now();
-  if (now.hour() == alarmHour && now.minute() == alarmMinute && now.second() == 0 && !sunriseStarted) {
-    sunriseStarted = true;
-    previousMillisSunrise = millis();
+  // Initialize with a default value to prevent garbage data
+  DateTime now = DateTime(2000, 1, 1, 0, 0, 0);
+  static int lastAlarmDay = -1; // Tracks the last day the alarm was triggered
+  
+  // I2C Protection: Safely reads RTC data
+  if (xSemaphoreTake(i2cMutex, portMAX_DELAY)) {
+    now = rtc.now();
+    xSemaphoreGive(i2cMutex);
+  }
+  
+  // Check if it's the correct time, ensuring it only triggers once per day
+  if (now.year() > 2000 && now.hour() == alarmHour && now.minute() == alarmMinute && !sunriseStarted) {
+    if (lastAlarmDay != now.day()) {
+      sunriseStarted = true;
+      previousMillisSunrise = millis();
+      lastAlarmDay = now.day();
+    }
   }
 }
 
@@ -622,7 +666,7 @@ void setLights() {
 
   switch (currentLightLuminosity) {
     case OFF_LUMINOSITY:
-      strip.clear(); // Garantir que apaga perfeitamente no OFF
+      strip.clear(); // Ensure perfect shutdown
       strip.setBrightness(0);
       break;
     case DAY_LUMINOSITY:
@@ -631,10 +675,21 @@ void setLights() {
     case NIGHT_LUMINOSITY:
       strip.setBrightness(20);
       break;
-    case AUTO_LUMINOSITY:
-      int brightness = map(globalFilteredLDR, 0, 4095, 10, 255); // Usa a variável GLOBAL!
+    case AUTO_LUMINOSITY: {
+      // Map the sensor reading to a 0-255 scale (Linear)
+      long linearBase = map(globalFilteredLDR, 0, 4095, 0, 255);
+      
+      // Apply Exponential (Quadratic) mathematical curve
+      // Multiplying by itself and dividing by the maximum (255) creates the perfect curve!
+      int brightness = 10 + ((linearBase * linearBase) / 255);
+      
+      // Ensure safety limit
+      if (brightness > 255) brightness = 255;
+      
       strip.setBrightness(brightness);
+
       break;
+    }
   }
 }
 
@@ -657,16 +712,23 @@ void taskLED(void *parameters) {
 void setup() {
   Serial.begin(115200);
   
+  // Initialize MUTEX (Before starting I2C)
+  i2cMutex = xSemaphoreCreateMutex();
+  
   Wire.begin(21, 22);
   
-  if (!rtc.begin()) {
-    Serial.println("RTC not found!");
-    while (1);
-  }
-  
-  if (rtc.lostPower()) {
-    Serial.println("RTC lost power, adjusting...");
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  // Ensure I2C is protected during startup (Safety precaution)
+  if (xSemaphoreTake(i2cMutex, portMAX_DELAY)) {
+    if (!rtc.begin()) {
+      Serial.println("RTC not found!");
+      while (1);
+    }
+    
+    if (rtc.lostPower()) {
+      Serial.println("RTC lost power, adjusting...");
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
+    xSemaphoreGive(i2cMutex);
   }
   
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
